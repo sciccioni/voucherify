@@ -42,8 +42,6 @@ def get_campaign_validation_rules(name):
             if rule_res.status_code == 200:
                 rule = rule_res.json()
                 rules_detail.append(rule)
-
-                # CASO 1: limite nelle validation rules (es. COMARKETING)
                 for rule_key, rule_val in rule.get("rules", {}).items():
                     if isinstance(rule_val, dict):
                         if rule_val.get("name") == "redemption.count.per_customer":
@@ -52,7 +50,6 @@ def get_campaign_validation_rules(name):
                             if limit is not None:
                                 per_customer_limit = limit
 
-    # CASO 2: limite in voucher.redemption.quantity (es. TEST_SHIPPING)
     if per_customer_limit is None:
         per_customer_limit = campaign_data.get("voucher", {}).get("redemption", {}).get("quantity")
 
@@ -60,6 +57,35 @@ def get_campaign_validation_rules(name):
         "assignments": assignments,
         "rules_detail": rules_detail,
         "per_customer_limit": per_customer_limit
+    }
+
+def get_campaign_redemptions(name):
+    url = f"{BASE_URL}/redemptions?campaign_name={name.strip()}&limit=100"
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        return f"Errore: {res.text}"
+    data = res.json()
+    total = data.get("total", 0)
+    redemptions = data.get("redemptions", [])
+    successful = len([r for r in redemptions if r.get("result") == "SUCCESS"])
+    failed = len([r for r in redemptions if r.get("result") == "FAILURE"])
+    return {
+        "total_redemptions": total,
+        "successful": successful,
+        "failed": failed,
+        "redemptions": redemptions[:5]  # Solo le ultime 5 per non appesantire
+    }
+
+def get_campaign_vouchers(name):
+    url = f"{BASE_URL}/campaigns/{name.strip()}/vouchers?limit=5"
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        return f"Errore: {res.text}"
+    data = res.json()
+    vouchers = data.get("vouchers", [])
+    return {
+        "total_vouchers": data.get("total", 0),
+        "sample_codes": [v.get("code") for v in vouchers[:5]]
     }
 
 def list_campaigns():
@@ -95,49 +121,78 @@ def debug_campaign(name):
     if per_customer_limit is None:
         per_customer_limit = campaign_data.get("voucher", {}).get("redemption", {}).get("quantity")
 
+    redemptions_url = f"{BASE_URL}/redemptions?campaign_name={name.strip()}&limit=100"
+    redemptions_res = requests.get(redemptions_url, headers=HEADERS)
+    redemptions_data = redemptions_res.json() if redemptions_res.status_code == 200 else {}
+
+    vouchers_url = f"{BASE_URL}/campaigns/{name.strip()}/vouchers?limit=5"
+    vouchers_res = requests.get(vouchers_url, headers=HEADERS)
+    vouchers_data = vouchers_res.json() if vouchers_res.status_code == 200 else {}
+
     return {
         "campaign": campaign_data,
         "assignments": assignments,
         "rules_detail": rules_detail,
-        "per_customer_limit": per_customer_limit
+        "per_customer_limit": per_customer_limit,
+        "redemptions": redemptions_data,
+        "vouchers": vouchers_data
     }
 
 # --- AGENTE ---
 def run_conversation(user_prompt, chat_history):
     system_prompt = """Sei un assistente di supporto clienti per PhotoSì, esperto delle campagne promozionali Voucherify.
 
-Quando l'utente chiede info su una campagna, chiama SEMPRE sia get_campaign_info che get_campaign_validation_rules.
+Quando l'utente chiede info su una campagna, chiama SEMPRE tutte e 4 le funzioni:
+1. get_campaign_info
+2. get_campaign_validation_rules
+3. get_campaign_redemptions
+4. get_campaign_vouchers
 
 Rispondi SEMPRE in questo formato:
 
 📅 Quando posso richiedere il codice promo?
-Dal [start_date] al [expiration_date] (con validità dei codici fino al [expiration_date])
+Dal [created_at formattata] al [expiration_date formattata] (con validità dei codici fino al [expiration_date formattata])
 
 🎁 Cosa prevede la promo?
-[sconto] su ordine minimo [minimumOrderValue] euro, spese di spedizione escluse, non cumulabile con altre promo
+[sconto da discount.percent_off o amount_off] su ordine minimo [minimumOrderValue] euro, spese di spedizione escluse, non cumulabile con altre promo
+(usa metadata.labelPromo.IT come etichetta breve es. "-30%")
 
 🛍️ Per quali prodotti è valido il codice?
-Usa il campo metadata.longDescription.IT per descrivere i prodotti validi
+Usa metadata.longDescription.IT per descrivere i prodotti validi
 
 📱 Posso ordinare sia da app che dal sito?
 Sì, sia da app che dal sito PhotoSì
 
 🔁 Quante volte posso usare il codice?
-Leggi il campo "per_customer_limit" restituito da get_campaign_validation_rules:
+Usa il campo per_customer_limit da get_campaign_validation_rules:
 - Se è un numero: "Il codice può essere utilizzato massimo [N] volte per cliente"
-- Se è null o mancante: "Non specificato"
+- Se è null: "Non specificato"
 
 ⏳ Entro quanto è valido il codice?
 Il codice sarà valido entro il [expiration_date formattata come GG mese AAAA]
 
+📊 Stato della campagna
+- La campagna è attualmente: [Attiva ✅ / Scaduta ⚠️] (da campo active)
+- Categoria: [category] (es. "Exclusive - non stackable" significa non cumulabile)
+- Codici totali generati: [vouchers_count]
+- Codici già utilizzati: [total_redemptions da get_campaign_redemptions]
+- Utilizzi andati a buon fine: [successful]
+- Utilizzi falliti: [failed]
+
+🌍 La promo è disponibile anche in altre lingue?
+Sì, la promo è disponibile in: Italiano, Inglese, Tedesco, Francese, Spagnolo, Olandese
+(elenca solo le lingue per cui esiste metadata.longDescription)
+
 Regole importanti:
-- Chiama SEMPRE entrambe le funzioni
-- Il campo per_customer_limit è già estratto, usalo direttamente senza cercare nel JSON
+- Chiama SEMPRE tutte e 4 le funzioni prima di rispondere
+- Il campo per_customer_limit è già estratto, usalo direttamente
 - NON mostrare mai JSON grezzo
 - Date sempre in formato: GG mese AAAA (es. 30 novembre 2025)
-- Se la campagna è scaduta aggiungi ⚠️ CAMPAGNA SCADUTA in cima
-- Se l'utente non conosce il nome della campagna usa list_campaigns
-- Rispondi sempre in italiano"""
+- Se expiration_date è assente scrivi "Nessuna scadenza impostata"
+- Se la campagna è scaduta aggiungi ⚠️ CAMPAGNA SCADUTA in cima alla risposta
+- Se l'utente non conosce il nome usa list_campaigns
+- Rispondi sempre in italiano
+- Mantieni un tono cordiale e professionale da supporto clienti"""
 
     messages = [{"role": "system", "content": system_prompt}]
     for msg in chat_history[:-1]:
@@ -152,7 +207,7 @@ Regole importanti:
                 "description": "Ottieni tutti i dettagli di una campagna specifica da Voucherify",
                 "parameters": {
                     "type": "object",
-                    "properties": {"name": {"type": "string", "description": "Nome o ID della campagna"}},
+                    "properties": {"name": {"type": "string"}},
                     "required": ["name"],
                 },
             },
@@ -161,10 +216,34 @@ Regole importanti:
             "type": "function",
             "function": {
                 "name": "get_campaign_validation_rules",
-                "description": "Recupera le validation rules di una campagna. Restituisce per_customer_limit con il numero massimo di utilizzi per cliente",
+                "description": "Recupera le validation rules. Restituisce per_customer_limit con il numero massimo di utilizzi per cliente",
                 "parameters": {
                     "type": "object",
-                    "properties": {"name": {"type": "string", "description": "Nome o ID della campagna"}},
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_campaign_redemptions",
+                "description": "Recupera lo storico utilizzi della campagna: totale, riusciti e falliti",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_campaign_vouchers",
+                "description": "Recupera il numero totale di voucher generati per la campagna",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
                     "required": ["name"],
                 },
             },
@@ -179,7 +258,7 @@ Regole importanti:
         },
     ]
 
-    for _ in range(5):
+    for _ in range(8):
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
@@ -200,6 +279,10 @@ Regole importanti:
                 result = get_campaign_info(args.get("name"))
             elif function_name == "get_campaign_validation_rules":
                 result = get_campaign_validation_rules(args.get("name"))
+            elif function_name == "get_campaign_redemptions":
+                result = get_campaign_redemptions(args.get("name"))
+            elif function_name == "get_campaign_vouchers":
+                result = get_campaign_vouchers(args.get("name"))
             elif function_name == "list_campaigns":
                 result = list_campaigns()
             else:
