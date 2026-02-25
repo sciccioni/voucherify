@@ -43,7 +43,7 @@ def get_campaign_validation_rules(name):
                 rule = rule_res.json()
                 rules_detail.append(rule)
 
-                # Estrai il limite per cliente
+                # CASO 1: limite nelle validation rules (es. COMARKETING)
                 for rule_key, rule_val in rule.get("rules", {}).items():
                     if isinstance(rule_val, dict):
                         if rule_val.get("name") == "redemption.count.per_customer":
@@ -51,6 +51,10 @@ def get_campaign_validation_rules(name):
                             limit = conditions.get("$less_than_or_equal", [None])[0]
                             if limit is not None:
                                 per_customer_limit = limit
+
+    # CASO 2: limite in voucher.redemption.quantity (es. TEST_SHIPPING)
+    if per_customer_limit is None:
+        per_customer_limit = campaign_data.get("voucher", {}).get("redemption", {}).get("quantity")
 
     return {
         "assignments": assignments,
@@ -88,6 +92,9 @@ def debug_campaign(name):
                             if limit is not None:
                                 per_customer_limit = limit
 
+    if per_customer_limit is None:
+        per_customer_limit = campaign_data.get("voucher", {}).get("redemption", {}).get("quantity")
+
     return {
         "campaign": campaign_data,
         "assignments": assignments,
@@ -99,36 +106,37 @@ def debug_campaign(name):
 def run_conversation(user_prompt, chat_history):
     system_prompt = """Sei un assistente di supporto clienti per PhotoSì, esperto delle campagne promozionali Voucherify.
 
-Quando recuperi i dati di una campagna, chiama SEMPRE sia get_campaign_info che get_campaign_validation_rules.
+Quando l'utente chiede info su una campagna, chiama SEMPRE sia get_campaign_info che get_campaign_validation_rules.
 
 Rispondi SEMPRE in questo formato:
 
 📅 Quando posso richiedere il codice promo?
-Dal [start_date] al [expiration_date] (con validità dei codici fino al [voucher_validity])
+Dal [start_date] al [expiration_date] (con validità dei codici fino al [expiration_date])
 
 🎁 Cosa prevede la promo?
-[sconto] su ordine minimo [importo] euro, spese di spedizione escluse, non cumulabile con altre promo
+[sconto] su ordine minimo [minimumOrderValue] euro, spese di spedizione escluse, non cumulabile con altre promo
 
 🛍️ Per quali prodotti è valido il codice?
-Leggi il campo metadata.longDescription.IT della campagna e usalo per descrivere i prodotti validi
+Usa il campo metadata.longDescription.IT per descrivere i prodotti validi
 
 📱 Posso ordinare sia da app che dal sito?
 Sì, sia da app che dal sito PhotoSì
 
 🔁 Quante volte posso usare il codice?
-Leggi il campo "per_customer_limit" restituito da get_campaign_validation_rules.
-Se contiene un numero scrivi: "Il codice può essere utilizzato massimo [N] volte per cliente"
-Se è null scrivi: "Non specificato"
+Leggi il campo "per_customer_limit" restituito da get_campaign_validation_rules:
+- Se è un numero: "Il codice può essere utilizzato massimo [N] volte per cliente"
+- Se è null o mancante: "Non specificato"
 
 ⏳ Entro quanto è valido il codice?
-Il codice sarà valido entro il [expiration_date formattata]
+Il codice sarà valido entro il [expiration_date formattata come GG mese AAAA]
 
-Regole:
-- Chiama SEMPRE entrambe get_campaign_info e get_campaign_validation_rules
-- Il campo per_customer_limit è già estratto e pronto, usalo direttamente
-- NON mostrare JSON grezzo
-- Date in formato: GG mese AAAA (es. 30 novembre 2025)
-- Se la campagna è scaduta aggiungi ⚠️ in cima
+Regole importanti:
+- Chiama SEMPRE entrambe le funzioni
+- Il campo per_customer_limit è già estratto, usalo direttamente senza cercare nel JSON
+- NON mostrare mai JSON grezzo
+- Date sempre in formato: GG mese AAAA (es. 30 novembre 2025)
+- Se la campagna è scaduta aggiungi ⚠️ CAMPAGNA SCADUTA in cima
+- Se l'utente non conosce il nome della campagna usa list_campaigns
 - Rispondi sempre in italiano"""
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -144,7 +152,7 @@ Regole:
                 "description": "Ottieni tutti i dettagli di una campagna specifica da Voucherify",
                 "parameters": {
                     "type": "object",
-                    "properties": {"name": {"type": "string"}},
+                    "properties": {"name": {"type": "string", "description": "Nome o ID della campagna"}},
                     "required": ["name"],
                 },
             },
@@ -153,10 +161,10 @@ Regole:
             "type": "function",
             "function": {
                 "name": "get_campaign_validation_rules",
-                "description": "Recupera le validation rules di una campagna. Restituisce il campo per_customer_limit con il numero massimo di utilizzi per cliente",
+                "description": "Recupera le validation rules di una campagna. Restituisce per_customer_limit con il numero massimo di utilizzi per cliente",
                 "parameters": {
                     "type": "object",
-                    "properties": {"name": {"type": "string"}},
+                    "properties": {"name": {"type": "string", "description": "Nome o ID della campagna"}},
                     "required": ["name"],
                 },
             },
@@ -165,7 +173,7 @@ Regole:
             "type": "function",
             "function": {
                 "name": "list_campaigns",
-                "description": "Elenca tutte le campagne disponibili",
+                "description": "Elenca tutte le campagne disponibili su Voucherify",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -231,7 +239,7 @@ if prompt := st.chat_input("Es: Dimmi tutto sulla campagna COMARKETING_TUM_SETT2
 # --- DEBUG SIDEBAR ---
 with st.sidebar:
     st.header("🔧 Debug JSON")
-    st.caption("Mostra il JSON grezzo per verificare i campi")
+    st.caption("Mostra il JSON grezzo per verificare i campi restituiti da Voucherify")
     campaign_debug = st.text_input("Nome campagna")
     if st.button("Mostra JSON grezzo") and campaign_debug:
         with st.spinner("Caricamento..."):
