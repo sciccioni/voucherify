@@ -65,15 +65,33 @@ def get_campaign_redemptions(name):
     if res.status_code != 200:
         return f"Errore: {res.text}"
     data = res.json()
-    total = data.get("total", 0)
     redemptions = data.get("redemptions", [])
-    successful = len([r for r in redemptions if r.get("result") == "SUCCESS"])
-    failed = len([r for r in redemptions if r.get("result") == "FAILURE"])
+    
+    # Filtra per campaign name anche lato client come fallback
+    campaign_redemptions = [
+        r for r in redemptions 
+        if r.get("voucher", {}).get("campaign") == name.strip()
+        or r.get("voucher", {}).get("campaign_id") in [
+            a.get("related_object_id") for a in redemptions
+        ]
+    ]
+    
+    # Conta per tipo escludendo rollback
+    successful = len([r for r in redemptions 
+                      if r.get("result") == "SUCCESS" 
+                      and r.get("object") == "redemption"
+                      and r.get("status") == "SUCCEEDED"])
+    failed = len([r for r in redemptions 
+                  if r.get("result") == "FAILURE"])
+    rolled_back = len([r for r in redemptions 
+                       if r.get("status") == "ROLLED_BACK"])
+    
     return {
-        "total_redemptions": total,
+        "total_redemptions": data.get("total", 0),
         "successful": successful,
         "failed": failed,
-        "redemptions": redemptions[:5]  # Solo le ultime 5 per non appesantire
+        "rolled_back": rolled_back,
+        "warning": "I dati potrebbero includere redemptions di altre campagne se il filtro API non funziona correttamente"
     }
 
 def get_campaign_vouchers(name):
