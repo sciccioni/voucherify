@@ -1,54 +1,67 @@
 import streamlit as st
-from voucherify.client import Client # Import corretto per il pacchetto 'voucherify'
+import requests
 from langchain_openai import ChatOpenAI
 from langchain.agents import initialize_agent, Tool
 from langchain.agents import AgentType
 
-# --- 1. CONFIGURAZIONE ---
+# --- 1. CONFIGURAZIONE CHIAVI ---
 try:
-    v_id = st.secrets["VOUCHERIFY_APP_ID"]
-    v_key = st.secrets["VOUCHERIFY_SECRET_KEY"]
-    o_key = st.secrets["OPENAI_API_KEY"]
+    V_ID = st.secrets["VOUCHERIFY_APP_ID"]
+    V_KEY = st.secrets["VOUCHERIFY_SECRET_KEY"]
+    O_KEY = st.secrets["OPENAI_API_KEY"]
 except Exception as e:
-    st.error(f"⚠️ Errore nei Secrets: {e}")
+    st.error(f"⚠️ Errore Secrets: {e}")
     st.stop()
 
-# Inizializzazione Client
-# La classe Client si aspetta app_id e secret_key
-v_client = Client(app_id=v_id, secret_key=v_key)
+# Configurazione Header per Voucherify
+HEADERS = {
+    "X-App-Id": V_ID,
+    "X-App-Token": V_KEY,
+    "Content-Type": "application/json"
+}
+BASE_URL = "https://api.voucherify.io/v1"
 
-# --- 2. TOOLS ---
-def get_campaign_tool(name):
+# --- 2. FUNZIONI API (I NOSTRI TOOL) ---
+def get_campaign_info(campaign_name):
+    """Chiama direttamente l'API di Voucherify per una campagna."""
     try:
-        # Pulisce l'input dell'AI
-        clean_name = str(name).strip().replace("'", "").replace('"', "")
-        res = v_client.campaigns.get(clean_name)
-        return f"Dati della campagna {clean_name}: {res}"
+        name = str(campaign_name).strip().replace("'", "").replace('"', "")
+        url = f"{BASE_URL}/campaigns/{name}"
+        response = requests.get(url, headers=HEADERS)
+        if response.status_code == 200:
+            return str(response.json())
+        else:
+            return f"Errore Voucherify: {response.status_code} - {response.text}"
     except Exception as e:
-        return f"Errore nel recupero della campagna: {str(e)}"
+        return f"Errore connessione: {str(e)}"
 
-def list_campaigns_tool(_=None):
+def list_campaigns(_=None):
+    """Elenca le campagne tramite API."""
     try:
-        res = v_client.campaigns.list({"limit": 5})
-        return f"Ultime campagne: {res}"
+        url = f"{BASE_URL}/campaigns?limit=10"
+        response = requests.get(url, headers=HEADERS)
+        if response.status_code == 200:
+            return str(response.json())
+        return f"Errore: {response.status_code}"
     except Exception as e:
-        return f"Errore nella lista: {str(e)}"
+        return f"Errore: {str(e)}"
 
 tools = [
     Tool(
         name="Dettagli_Campagna",
-        func=get_campaign_tool,
-        description="Usa questo per ottenere info su una singola campagna. Fornisci il nome come input."
+        func=get_campaign_info,
+        description="Ottiene info su una singola campagna. Passa solo il nome della campagna."
     ),
     Tool(
-        name="Elenco_Campagne",
-        func=list_campaigns_tool,
-        description="Usa questo per vedere la lista delle campagne disponibili."
+        name="Lista_Campagne",
+        func=list_campaigns,
+        description="Mostra le ultime campagne create."
     )
 ]
 
 # --- 3. INTERFACCIA ---
-st.title("🎫 Voucherify AI Agent")
+st.set_page_config(page_title="Voucherify AI Agent", page_icon="🎫")
+st.title("🎫 Voucherify AI Agent (Direct API)")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -57,24 +70,24 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
-if prompt := st.chat_input("Chiedimi qualcosa sulle tue campagne..."):
+if prompt := st.chat_input("Chiedimi info sulle campagne..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        llm = ChatOpenAI(model="gpt-4o", openai_api_key=o_key, temperature=0)
-        agent = initialize_agent(
-            tools, llm, 
-            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, 
-            verbose=True,
-            handle_parsing_errors=True
-        )
-        
-        with st.spinner("Sto consultando Voucherify..."):
-            try:
+        try:
+            llm = ChatOpenAI(model="gpt-4o", openai_api_key=O_KEY, temperature=0)
+            agent = initialize_agent(
+                tools, llm, 
+                agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION, 
+                verbose=True,
+                handle_parsing_errors=True
+            )
+            
+            with st.spinner("Interrogando Voucherify via REST API..."):
                 response = agent.run(prompt)
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
-            except Exception as e:
-                st.error(f"Errore durante l'elaborazione: {e}")
+        except Exception as e:
+            st.error(f"Errore: {e}")
