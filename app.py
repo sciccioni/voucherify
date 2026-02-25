@@ -23,29 +23,39 @@ def get_campaign_info(name):
     return res.json() if res.status_code == 200 else f"Errore: {res.text}"
 
 def get_campaign_validation_rules(name):
-    # Prendi i dati campagna per estrarre i rule_id da validation_rules_assignments
     url = f"{BASE_URL}/campaigns/{name.strip()}"
     res = requests.get(url, headers=HEADERS)
     if res.status_code != 200:
         return f"Errore: {res.text}"
-    
+
     campaign_data = res.json()
-    
-    # I rule_id sono dentro campaign.validation_rules_assignments.data
     assignments = campaign_data.get("validation_rules_assignments", {}).get("data", [])
-    
+
     rules_detail = []
+    per_customer_limit = None
+
     for item in assignments:
         rule_id = item.get("rule_id")
         if rule_id:
             rule_url = f"{BASE_URL}/validation-rules/{rule_id}"
             rule_res = requests.get(rule_url, headers=HEADERS)
             if rule_res.status_code == 200:
-                rules_detail.append(rule_res.json())
-    
+                rule = rule_res.json()
+                rules_detail.append(rule)
+
+                # Estrai il limite per cliente
+                for rule_key, rule_val in rule.get("rules", {}).items():
+                    if isinstance(rule_val, dict):
+                        if rule_val.get("name") == "redemption.count.per_customer":
+                            conditions = rule_val.get("conditions", {})
+                            limit = conditions.get("$less_than_or_equal", [None])[0]
+                            if limit is not None:
+                                per_customer_limit = limit
+
     return {
         "assignments": assignments,
-        "rules_detail": rules_detail
+        "rules_detail": rules_detail,
+        "per_customer_limit": per_customer_limit
     }
 
 def list_campaigns():
@@ -54,26 +64,35 @@ def list_campaigns():
     return res.json() if res.status_code == 200 else f"Errore: {res.text}"
 
 def debug_campaign(name):
-    # Campaign info
     url = f"{BASE_URL}/campaigns/{name.strip()}"
     res = requests.get(url, headers=HEADERS)
     campaign_data = res.json() if res.status_code == 200 else {}
-    
-    # Validation rules dal campo interno alla campagna
+
     assignments = campaign_data.get("validation_rules_assignments", {}).get("data", [])
     rules_detail = []
+    per_customer_limit = None
+
     for item in assignments:
         rule_id = item.get("rule_id")
         if rule_id:
             rule_url = f"{BASE_URL}/validation-rules/{rule_id}"
             rule_res = requests.get(rule_url, headers=HEADERS)
             if rule_res.status_code == 200:
-                rules_detail.append(rule_res.json())
-    
+                rule = rule_res.json()
+                rules_detail.append(rule)
+                for rule_key, rule_val in rule.get("rules", {}).items():
+                    if isinstance(rule_val, dict):
+                        if rule_val.get("name") == "redemption.count.per_customer":
+                            conditions = rule_val.get("conditions", {})
+                            limit = conditions.get("$less_than_or_equal", [None])[0]
+                            if limit is not None:
+                                per_customer_limit = limit
+
     return {
         "campaign": campaign_data,
         "assignments": assignments,
-        "rules_detail": rules_detail
+        "rules_detail": rules_detail,
+        "per_customer_limit": per_customer_limit
     }
 
 # --- AGENTE ---
@@ -88,30 +107,28 @@ Rispondi SEMPRE in questo formato:
 Dal [start_date] al [expiration_date] (con validità dei codici fino al [voucher_validity])
 
 🎁 Cosa prevede la promo?
-[sconto] su ordine minimo [importo] euro, [spese spedizione], [cumulabilità]
+[sconto] su ordine minimo [importo] euro, spese di spedizione escluse, non cumulabile con altre promo
 
 🛍️ Per quali prodotti è valido il codice?
-[prodotti]
+Leggi il campo metadata.longDescription.IT della campagna e usalo per descrivere i prodotti validi
 
 📱 Posso ordinare sia da app che dal sito?
-[risposta]
+Sì, sia da app che dal sito PhotoSì
 
 🔁 Quante volte posso usare il codice?
-Cerca il limite in rules_detail, in particolare nei campi:
-- rules.redemption.per_customer (o quantity, count, limit, max)
-- qualsiasi campo numerico che indica un limite per cliente
-Se trovi un numero scrivilo come: "Il codice può essere utilizzato massimo [N] volte per cliente"
-Altrimenti: "Non specificato"
+Leggi il campo "per_customer_limit" restituito da get_campaign_validation_rules.
+Se contiene un numero scrivi: "Il codice può essere utilizzato massimo [N] volte per cliente"
+Se è null scrivi: "Non specificato"
 
 ⏳ Entro quanto è valido il codice?
-Il codice sarà valido entro il [data]
+Il codice sarà valido entro il [expiration_date formattata]
 
 Regole:
 - Chiama SEMPRE entrambe get_campaign_info e get_campaign_validation_rules
-- Analizza TUTTO il JSON di rules_detail alla ricerca del limite per cliente
+- Il campo per_customer_limit è già estratto e pronto, usalo direttamente
 - NON mostrare JSON grezzo
-- Date in formato: GG mese AAAA
-- Se campagna scaduta aggiungi ⚠️ in cima
+- Date in formato: GG mese AAAA (es. 30 novembre 2025)
+- Se la campagna è scaduta aggiungi ⚠️ in cima
 - Rispondi sempre in italiano"""
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -136,7 +153,7 @@ Regole:
             "type": "function",
             "function": {
                 "name": "get_campaign_validation_rules",
-                "description": "Recupera le validation rules di una campagna inclusi i limiti di utilizzo per cliente (redemptions per customer)",
+                "description": "Recupera le validation rules di una campagna. Restituisce il campo per_customer_limit con il numero massimo di utilizzi per cliente",
                 "parameters": {
                     "type": "object",
                     "properties": {"name": {"type": "string"}},
@@ -214,7 +231,7 @@ if prompt := st.chat_input("Es: Dimmi tutto sulla campagna COMARKETING_TUM_SETT2
 # --- DEBUG SIDEBAR ---
 with st.sidebar:
     st.header("🔧 Debug JSON")
-    st.caption("Mostra il JSON grezzo per verificare i campi restituiti da Voucherify")
+    st.caption("Mostra il JSON grezzo per verificare i campi")
     campaign_debug = st.text_input("Nome campagna")
     if st.button("Mostra JSON grezzo") and campaign_debug:
         with st.spinner("Caricamento..."):
