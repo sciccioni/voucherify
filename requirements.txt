@@ -1,0 +1,5 @@
+streamlit
+voucherify-python-sdk
+langchain
+langchain-openai
+python-dotenv
