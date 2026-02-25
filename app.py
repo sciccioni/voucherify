@@ -23,20 +23,30 @@ def get_campaign_info(name):
     return res.json() if res.status_code == 200 else f"Errore: {res.text}"
 
 def get_campaign_validation_rules(name):
-    url = f"{BASE_URL}/campaigns/{name.strip()}/validation-rules-assignments"
+    # Prendi i dati campagna per estrarre i rule_id da validation_rules_assignments
+    url = f"{BASE_URL}/campaigns/{name.strip()}"
     res = requests.get(url, headers=HEADERS)
     if res.status_code != 200:
         return f"Errore: {res.text}"
-    data = res.json()
+    
+    campaign_data = res.json()
+    
+    # I rule_id sono dentro campaign.validation_rules_assignments.data
+    assignments = campaign_data.get("validation_rules_assignments", {}).get("data", [])
+    
     rules_detail = []
-    for item in data.get("data", []):
+    for item in assignments:
         rule_id = item.get("rule_id")
         if rule_id:
             rule_url = f"{BASE_URL}/validation-rules/{rule_id}"
             rule_res = requests.get(rule_url, headers=HEADERS)
             if rule_res.status_code == 200:
                 rules_detail.append(rule_res.json())
-    return {"assignments": data, "rules_detail": rules_detail}
+    
+    return {
+        "assignments": assignments,
+        "rules_detail": rules_detail
+    }
 
 def list_campaigns():
     url = f"{BASE_URL}/campaigns?limit=20"
@@ -44,21 +54,27 @@ def list_campaigns():
     return res.json() if res.status_code == 200 else f"Errore: {res.text}"
 
 def debug_campaign(name):
+    # Campaign info
     url = f"{BASE_URL}/campaigns/{name.strip()}"
     res = requests.get(url, headers=HEADERS)
-    data = res.json() if res.status_code == 200 else {}
-    url2 = f"{BASE_URL}/campaigns/{name.strip()}/validation-rules-assignments"
-    res2 = requests.get(url2, headers=HEADERS)
-    data2 = res2.json() if res2.status_code == 200 else {}
+    campaign_data = res.json() if res.status_code == 200 else {}
+    
+    # Validation rules dal campo interno alla campagna
+    assignments = campaign_data.get("validation_rules_assignments", {}).get("data", [])
     rules_detail = []
-    for item in data2.get("data", []):
+    for item in assignments:
         rule_id = item.get("rule_id")
         if rule_id:
             rule_url = f"{BASE_URL}/validation-rules/{rule_id}"
             rule_res = requests.get(rule_url, headers=HEADERS)
             if rule_res.status_code == 200:
                 rules_detail.append(rule_res.json())
-    return {"campaign": data, "validation_rules_assignments": data2, "rules_detail": rules_detail}
+    
+    return {
+        "campaign": campaign_data,
+        "assignments": assignments,
+        "rules_detail": rules_detail
+    }
 
 # --- AGENTE ---
 def run_conversation(user_prompt, chat_history):
@@ -81,11 +97,9 @@ Dal [start_date] al [expiration_date] (con validità dei codici fino al [voucher
 [risposta]
 
 🔁 Quante volte posso usare il codice?
-Cerca il limite utilizzi in TUTTI questi campi, in ordine:
-- rules_detail[*].rules.redemption.per_customer.count (o quantity o limit o max)
-- rules_detail[*] qualsiasi campo con "per_customer" o "redemption" e un valore numerico
-- assignments.data[*] qualsiasi campo numerico
-- campaign.voucher.redemption.quantity
+Cerca il limite in rules_detail, in particolare nei campi:
+- rules.redemption.per_customer (o quantity, count, limit, max)
+- qualsiasi campo numerico che indica un limite per cliente
 Se trovi un numero scrivilo come: "Il codice può essere utilizzato massimo [N] volte per cliente"
 Altrimenti: "Non specificato"
 
@@ -93,11 +107,11 @@ Altrimenti: "Non specificato"
 Il codice sarà valido entro il [data]
 
 Regole:
-- Chiama SEMPRE entrambe le funzioni get_campaign_info e get_campaign_validation_rules
-- Analizza TUTTO il JSON ricevuto, non fermarti ai campi principali
+- Chiama SEMPRE entrambe get_campaign_info e get_campaign_validation_rules
+- Analizza TUTTO il JSON di rules_detail alla ricerca del limite per cliente
 - NON mostrare JSON grezzo
 - Date in formato: GG mese AAAA
-- Se campagna scaduta: aggiungi ⚠️ in cima
+- Se campagna scaduta aggiungi ⚠️ in cima
 - Rispondi sempre in italiano"""
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -122,7 +136,7 @@ Regole:
             "type": "function",
             "function": {
                 "name": "get_campaign_validation_rules",
-                "description": "Recupera le validation rules di una campagna, inclusi limiti di utilizzo per cliente",
+                "description": "Recupera le validation rules di una campagna inclusi i limiti di utilizzo per cliente (redemptions per customer)",
                 "parameters": {
                     "type": "object",
                     "properties": {"name": {"type": "string"}},
@@ -197,10 +211,10 @@ if prompt := st.chat_input("Es: Dimmi tutto sulla campagna COMARKETING_TUM_SETT2
             st.markdown(answer)
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
-# --- DEBUG PANEL ---
+# --- DEBUG SIDEBAR ---
 with st.sidebar:
     st.header("🔧 Debug JSON")
-    st.caption("Usa questo per vedere il JSON grezzo e trovare dove Voucherify nasconde i campi")
+    st.caption("Mostra il JSON grezzo per verificare i campi restituiti da Voucherify")
     campaign_debug = st.text_input("Nome campagna")
     if st.button("Mostra JSON grezzo") and campaign_debug:
         with st.spinner("Caricamento..."):
