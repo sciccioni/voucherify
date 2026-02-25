@@ -169,10 +169,3 @@ if prompt := st.chat_input("Es: Dimmi tutto sulla campagna SUMMER2024..."):
             answer = run_conversation(prompt, st.session_state.chat_history)
             st.markdown(answer)
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
-```
-
-E il `requirements.txt`:
-```
-streamlit
-openai
-requests
