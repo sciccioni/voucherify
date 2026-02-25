@@ -1,6 +1,5 @@
 streamlit
-voucherify-python-sdk
 langchain
 langchain-openai
 langchain-community
-openai
+voucherify-python-sdk
