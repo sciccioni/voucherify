@@ -20,7 +20,58 @@ BASE_URL = "https://api.voucherify.io/v1"
 def get_campaign_info(name):
     url = f"{BASE_URL}/campaigns/{name.strip()}"
     res = requests.get(url, headers=HEADERS)
-    return res.json() if res.status_code == 200 else f"Errore: {res.text}"
+    if res.status_code != 200:
+        return f"Errore: {res.text}"
+    
+    data = res.json()
+    
+    # Estrai il campo redemption limit in modo esplicito
+    redemption_info = {}
+    
+    # Cerca in validation_rules_assignments
+    val_rules_url = f"{BASE_URL}/campaigns/{name.strip()}/validation-rules-assignments"
+    val_res = requests.get(val_rules_url, headers=HEADERS)
+    if val_res.status_code == 200:
+        redemption_info["validation_rules"] = val_res.json()
+    
+    # Cerca il limite direttamente nella campagna
+    voucher = data.get("voucher", {})
+    redemption = voucher.get("redemption", {})
+    campaign_redemption = data.get("redemption", {})
+    
+    # Aggiungi info esplicite al dato restituito
+    data["_parsed_redemption"] = {
+        "quantity": data.get("vouchers_count"),
+        "per_customer_limit": redemption.get("quantity") or campaign_redemption.get("quantity"),
+        "redeemed_quantity": redemption.get("redeemed_quantity") or campaign_redemption.get("redeemed_quantity"),
+        "validation_rules_raw": redemption_info.get("validation_rules", {})
+    }
+    
+    return data
+
+def get_campaign_validation_rules(name):
+    """Recupera le validation rules di una campagna per trovare limiti per customer"""
+    url = f"{BASE_URL}/campaigns/{name.strip()}/validation-rules-assignments"
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        return f"Errore: {res.text}"
+    
+    data = res.json()
+    
+    # Ora recupera il dettaglio di ogni validation rule
+    rules_detail = []
+    for item in data.get("data", []):
+        rule_id = item.get("rule_id")
+        if rule_id:
+            rule_url = f"{BASE_URL}/validation-rules/{rule_id}"
+            rule_res = requests.get(rule_url, headers=HEADERS)
+            if rule_res.status_code == 200:
+                rules_detail.append(rule_res.json())
+    
+    return {
+        "assignments": data,
+        "rules_detail": rules_detail
+    }
 
 def list_campaigns():
     url = f"{BASE_URL}/campaigns?limit=20"
@@ -31,7 +82,9 @@ def list_campaigns():
 def run_conversation(user_prompt, chat_history):
     system_prompt = """Sei un assistente di supporto clienti per PhotoSì, esperto delle campagne promozionali Voucherify.
 
-Quando recuperi i dati di una campagna, rispondi SEMPRE in questo formato esatto:
+Quando recuperi i dati di una campagna, chiama SEMPRE sia get_campaign_info che get_campaign_validation_rules per avere tutti i dati completi.
+
+Rispondi SEMPRE in questo formato esatto:
 
 📅 Quando posso richiedere il codice promo?
 Dal [start_date] al [expiration_date] (con validità dei codici fino al [voucher_validity])
@@ -46,29 +99,31 @@ Dal [start_date] al [expiration_date] (con validità dei codici fino al [voucher
 Sì / No / [specifica se solo app o solo sito]
 
 🔁 Quante volte posso usare il codice?
-[numero utilizzi, es. "Il codice è valido per un solo utilizzo sia sull'app che sul sito PhotoSì"]
+[Cerca questo valore in questo ordine di priorità:]
+1. Nelle validation_rules_detail: cerca campi come "redemptions_per_customer", "per_customer", "customer_rules" o simili con un valore numerico
+2. Nel campo _parsed_redemption.per_customer_limit
+3. Nel campo voucher.redemption.quantity
+Se trovi un valore numerico (es. 3), scrivi: "Il codice può essere utilizzato massimo [N] volte per cliente"
+Se non trovi nulla, scrivi: "Non specificato"
 
 ⏳ Entro quanto è valido il codice?
 Il codice sarà valido entro il [voucher_expiry_date]
 
 ---
-Regole:
-- Usa SEMPRE get_campaign_info per recuperare i dati prima di rispondere
-- Se l'utente non conosce il nome esatto della campagna, usa list_campaigns e mostragli l'elenco con i nomi
+Regole importanti:
+- Chiama SEMPRE get_campaign_validation_rules oltre a get_campaign_info
+- Nelle validation rules cerca QUALSIASI campo che contenga "redemption", "per_customer", "customer", "limit", "quantity" con valore numerico
 - NON mostrare mai JSON grezzo
-- Se un'informazione non è disponibile nei dati, scrivi "Non specificato"
+- Se un'informazione non è disponibile, scrivi "Non specificato"
 - Rispondi sempre in italiano
 - Le date formattale sempre come: GG mese AAAA (es. 19 agosto 2024)
 - Se la campagna è scaduta, segnalalo con ⚠️ in cima alla risposta"""
 
-    # Costruisce i messaggi includendo la cronologia
     messages = [{"role": "system", "content": system_prompt}]
     
-    # Aggiunge la storia della chat (escludi l'ultimo messaggio utente, lo aggiungiamo dopo)
     for msg in chat_history[:-1]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     
-    # Aggiunge il messaggio corrente
     messages.append({"role": "user", "content": user_prompt})
 
     tools = [
@@ -76,14 +131,25 @@ Regole:
             "type": "function",
             "function": {
                 "name": "get_campaign_info",
-                "description": "Ottieni tutti i dettagli di una campagna specifica da Voucherify tramite il suo nome o ID",
+                "description": "Ottieni tutti i dettagli di una campagna specifica da Voucherify",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Il nome esatto o ID della campagna"
-                        }
+                        "name": {"type": "string", "description": "Nome o ID della campagna"}
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_campaign_validation_rules",
+                "description": "Recupera le validation rules di una campagna, inclusi i limiti di utilizzo per cliente (redemptions per customer per incentive)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Nome o ID della campagna"}
                     },
                     "required": ["name"],
                 },
@@ -94,34 +160,41 @@ Regole:
             "function": {
                 "name": "list_campaigns",
                 "description": "Elenca tutte le campagne disponibili su Voucherify",
-                "parameters": {
-                    "type": "object",
-                    "properties": {}
-                },
+                "parameters": {"type": "object", "properties": {}},
             },
         }
     ]
 
-    # Prima chiamata
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-    )
-
-    response_message = response.choices[0].message
-    tool_calls = response_message.tool_calls
-
-    if tool_calls:
-        messages.append(response_message)
+    # Loop agente per gestire multiple tool calls
+    max_iterations = 5
+    iteration = 0
+    
+    while iteration < max_iterations:
+        iteration += 1
         
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+        )
+
+        response_message = response.choices[0].message
+        tool_calls = response_message.tool_calls
+
+        if not tool_calls:
+            return response_message.content
+
+        messages.append(response_message)
+
         for tool_call in tool_calls:
             function_name = tool_call.function.name
             args = json.loads(tool_call.function.arguments)
 
             if function_name == "get_campaign_info":
                 result = get_campaign_info(args.get("name"))
+            elif function_name == "get_campaign_validation_rules":
+                result = get_campaign_validation_rules(args.get("name"))
             elif function_name == "list_campaigns":
                 result = list_campaigns()
             else:
@@ -134,14 +207,7 @@ Regole:
                 "content": json.dumps(result, ensure_ascii=False),
             })
 
-        # Seconda chiamata con i risultati dei tool
-        second_response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-        )
-        return second_response.choices[0].message.content
-
-    return response_message.content
+    return "Non sono riuscito a recuperare le informazioni. Riprova."
 
 
 # --- INTERFACCIA STREAMLIT ---
@@ -149,17 +215,14 @@ st.set_page_config(page_title="Voucherify Agent", page_icon="🎫", layout="cent
 st.title("🎫 PhotoSì - Voucherify Agent")
 st.caption("Chiedimi info su qualsiasi campagna promozionale")
 
-# Inizializza la cronologia
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Mostra la cronologia
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Input utente
-if prompt := st.chat_input("Es: Dimmi tutto sulla campagna SUMMER2024..."):
+if prompt := st.chat_input("Es: Dimmi tutto sulla campagna COMARKETING_TUM_SETT2025_3..."):
     st.session_state.chat_history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
